@@ -22,7 +22,7 @@ ARCHITECTURES = {
         'id' : ['model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight',1,768],
         'type_id' : ['model.diffusion_model.input_blocks.0.0.weight',1,4],
         'filename' : 'models/V1_5inpaintdifference.safetensors',
-        'url' : 'https://huggingface.co/groinge/inpaintdifferencemerge/blob/main/V1_5inpaintdifference.safetensors'
+        'url' : 'https://huggingface.co/groinge/inpaintdifferencemerge/resolve/main/V1_5inpaintdifference.safetensors'
     }
 }
 
@@ -38,12 +38,12 @@ class script(scripts.Script):
                 return scripts.AlwaysVisible
         
         def ui(self,is_img2img):
-            with gr.Accordion(label=extension_name):
+            with gr.Accordion(label=extension_name,open=False):
                 with gr.Row():
                     button = gr.Button(value = 'Convert',scale=3,variant='primary')
                     use_cuda = gr.Checkbox(value = True, label="Use cuda for merging")
                 with gr.Row():
-                    display = gr.Textbox(label="",interactive=False,max_lines=1)
+                    display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
                 
                 button.click(fn=event,inputs=use_cuda,outputs=display)
 
