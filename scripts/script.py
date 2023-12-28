@@ -1,8 +1,6 @@
 import gradio as gr
-from pathlib import Path
-from modules import script_callbacks,scripts, devices, sd_hijack, processing
+from modules import scripts, devices, processing
 from modules.sd_models import *
-from modules.timer import Timer
 from modules.modelloader import load_file_from_url
 from tqdm import tqdm
 from copy import deepcopy
@@ -45,7 +43,7 @@ class script(scripts.Script):
             with gr.Accordion(label=extension_name,visible=is_img2img,open=False):
                 with gr.Row():
                     sets = gr.Checkboxgroup(value = config['sets'],choices=[("Auto convert","auto"),("Use cuda for merging","cuda")])
-                    button = gr.Button(value = 'Convert',variant='primary')
+                    button = gr.Button(value = 'Convert to inpaint',variant='primary')
                 with gr.Row():
                     display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
                 
@@ -61,7 +59,7 @@ class script(scripts.Script):
                 load_model(checkpoint_info=script.checkpointinfo)
 
         def event(self,use_cuda):
-            message,script.checkpointinfo = convert(use_cuda)
+            message,script.checkpointinfo = convert(use_cuda) #checkpoint info of the original model is kept so it can be reloaded
             print(extension_name+':  '+message)
             return extension_name+':  '+message
 
@@ -75,7 +73,7 @@ def convert(sets):
 
     if not model_data.sd_model: return "No checkpoint loaded.",None
     sd_0, checkpoint_info, arch, message = grab_active_model_sd(device)
-    if not sd_0: sd_hijack.model_hijack.hijack(model_data.sd_model); return message,checkpoint_info
+    if not sd_0: return message,checkpoint_info
     fake_cp_info = deepcopy(checkpoint_info)
 
     sd_1 = load_inpaint_statedict(arch, device)
@@ -86,6 +84,8 @@ def convert(sets):
         a = list(sd_0[k0].shape)
         b = list(sd_1[k1].shape)
 
+        #This makes sure that only the layers shared between a standard and inpainting unet are merged
+        #Copied from https://github.com/hako-mikan/sd-webui-supermerger
         if a != b and a[0:1] + a[2:] == b[0:1] + b[2:]:
             sd_1[k1][:, 0:4, :, :] = sd_1[k1][:, 0:4, :, :] + sd_0[k0]
             sd_0[k0] = sd_1[k1]
@@ -119,9 +119,11 @@ def grab_active_model_sd(device):
     for info in ARCHITECTURES.values():
         elname, idindex, iddim = info['id']
         elem = state_dict.get(elname)
+        #Identifies the architecture of the model by checking if it contains a known unique elem and dimension
         if list(elem) and list(elem.shape)[idindex] == iddim:
             elname, idindex, iddim = info['type_id']
             elem = state_dict.get(elname)
+            #Makes sure its a standard model (Not inpaint or pix2pix)
             if list(elem.shape)[idindex] == iddim:
                 arch = info
                 break
@@ -134,8 +136,8 @@ def grab_active_model_sd(device):
     gr.Info(extension_name+':  Converting model to inpaint...')
 
     model_data.sd_model.to(torch.device(device))
-    sd_hijack.model_hijack.undo_hijack(model_data.sd_model)
-
+    from modules import sd_hijack
+    sd_hijack.model_hijack.undo_hijack(model_data.sd_model) #Undo hijack to get a state_dict without optimizations
     sd_0 = deepcopy(model_data.sd_model.state_dict())
 
     unload_model_weights(model_data.sd_model)
