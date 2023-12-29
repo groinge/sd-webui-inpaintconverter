@@ -18,21 +18,19 @@ with open(ext2abs('config.json'), 'r') as f:
     config = json.load(f)
 
 ARCHITECTURES = {
-    'V1-inpaint': {
+    'V1.5-inpaint': {
+        'name' : 'V1.5-inpaint-diff',
         #Which element, shape index, and dimension to ID the architecture by
         'id' : ['model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight',1,768],
         'type_id' : ['model.diffusion_model.input_blocks.0.0.weight',1,4],
         'filename' : 'models/V1_5inpaintdifference.safetensors',
-        'url' : 'https://huggingface.co/groinge/inpaintdifferencemerge/resolve/main/V1_5inpaintdifference.safetensors',
-        'shorthash' : '5586d7b0cb',
+        'url' : 'https://huggingface.co/groinge/inpaintdifferencemerge/resolve/main/V1_5inpaintdifference.safetensors'
     }
 }
 
 class script(scripts.Script):
         checkpointinfo = None
-        def __init__(self) -> None:
-            super().__init__()
-
+        display = None
         def title(self):
             return extension_name
 
@@ -41,27 +39,38 @@ class script(scripts.Script):
         
         def ui(self,is_img2img):
             with gr.Accordion(label=extension_name,visible=is_img2img,open=False):
+                with gr.Row(variant='default'):
+                    sets = gr.Checkboxgroup(value = config['sets'],choices=[("Auto convert","auto"),("Use cuda for merging","cuda")],label='Options')
+                    runbutton = gr.Button(value = 'Convert to inpaint',variant='primary')
+                    unloadbutton = gr.Button(value = 'Revert to standard model',variant='secondary')
                 with gr.Row():
-                    sets = gr.Checkboxgroup(value = config['sets'],choices=[("Auto convert","auto"),("Use cuda for merging","cuda")])
-                    button = gr.Button(value = 'Convert to inpaint',variant='primary')
-                with gr.Row():
-                    display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
+                    if is_img2img:
+                        script.display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
                 
-                button.click(fn=self.event,inputs=sets,outputs=display)
+                runbutton.click(fn=self.run,inputs=sets,outputs=script.display)
+                unloadbutton.click(fn=self.unload,outputs=script.display)
                 sets.change(fn=sets_config,inputs=sets)
             return [sets]
 
         def setup(self,p,sets):
-            if 'auto' in sets and isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask:
-                self.event(sets)
-            elif model_data.sd_model and model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
-                gr.Info(extension_name+':  Unloading inpainting model...')
-                load_model(checkpoint_info=script.checkpointinfo)
+            if model_data.sd_model:
+                if 'auto' in sets and isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask and not model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
+                    self.run(sets)
+                else: self.unload()
 
-        def event(self,use_cuda):
+        def run(self,use_cuda):
             message,script.checkpointinfo = convert(use_cuda) #checkpoint info of the original model is kept so it can be reloaded
-            print(extension_name+':  '+message)
-            return extension_name+':  '+message
+            script.display.update(value=extension_name+':  '+message) 
+        
+        def unload(self):
+            if model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
+                gr.Info(extension_name+':  Reverting to standard model...')
+                model_data.__init__()
+                load_model(checkpoint_info=script.checkpointinfo)
+                print('Reverted to previous checkpoint.')
+                gr.Info(extension_name+':  Reverted to previous checkpoint.')
+                script.display.update(value='Reverted to previous checkpoint.')
+
 
 def sets_config(sets):
     config['sets'] = sets
@@ -81,11 +90,10 @@ def convert(sets):
     for k1 in tqdm(list(sd_1.keys()),desc='Merging models'):
         k0 = 'model.diffusion_model.' + k1
 
-        a = list(sd_0[k0].shape)
-        b = list(sd_1[k1].shape)
-
         #This makes sure that only the layers shared between a standard and inpainting unet are merged
         #Copied from https://github.com/hako-mikan/sd-webui-supermerger
+        a = list(sd_0[k0].shape)
+        b = list(sd_1[k1].shape)
         if a != b and a[0:1] + a[2:] == b[0:1] + b[2:]:
             sd_1[k1][:, 0:4, :, :] = sd_1[k1][:, 0:4, :, :] + sd_0[k0]
             sd_0[k0] = sd_1[k1]
@@ -100,20 +108,20 @@ def convert(sets):
 
     gc.collect()
     devices.torch_gc()
+    gr.Info(extension_name+':  Successfully converted model.')
     return 'Successfully converted model.',checkpoint_info
 
 def load_inpaint_statedict(arch,device):
     if os.path.isfile(ext2abs(arch['filename'])):
         file = safetensors.torch.load_file(ext2abs(arch['filename']), device=device)
     else:
-        gr.Info('Downloading model (1.68 GB)...')
+        gr.Info(f"Downloading {arch['name']} unet (1.68 GB)...")
         file_path = load_file_from_url(arch['url'],model_dir=ext2abs('models'))
         file = safetensors.torch.load_file(file_path, device=device)
 
     return file.get('state_dict') or file
 
 def grab_active_model_sd(device):
-    checkpoint_info = model_data.sd_model.sd_checkpoint_info
     state_dict = model_data.sd_model.state_dict()
 
     for info in ARCHITECTURES.values():
@@ -139,9 +147,9 @@ def grab_active_model_sd(device):
     from modules import sd_hijack
     sd_hijack.model_hijack.undo_hijack(model_data.sd_model) #Undo hijack to get a state_dict without optimizations
     sd_0 = deepcopy(model_data.sd_model.state_dict())
+    checkpoint_info = model_data.sd_model.sd_checkpoint_info
 
     unload_model_weights(model_data.sd_model)
-    model_data.sd_model = None
     gc.collect()
     devices.torch_gc()
 
