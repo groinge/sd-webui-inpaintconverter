@@ -47,18 +47,19 @@ class script(scripts.Script):
                     if is_img2img:
                         script.display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
                 
-                runbutton.click(fn=self.run,inputs=sets,outputs=script.display)
+                runbutton.click(fn=self.convert_cp,inputs=sets,outputs=script.display)
                 unloadbutton.click(fn=self.unload,outputs=script.display)
                 sets.change(fn=sets_config,inputs=sets)
             return [sets]
 
         def setup(self,p,sets):
             if model_data.sd_model:
-                if 'auto' in sets and isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask and not model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
-                    self.run(sets)
+                if isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask:
+                    if 'auto' in sets and not model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
+                        self.convert_cp(sets)
                 else: self.unload()
 
-        def run(self,use_cuda):
+        def convert_cp(self,use_cuda):
             message,script.checkpointinfo = convert(use_cuda) #checkpoint info of the original model is kept so it can be reloaded
             script.display.update(value=extension_name+':  '+message) 
         
