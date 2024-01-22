@@ -1,159 +1,110 @@
 import gradio as gr
-from modules import scripts, devices, processing
-from modules.sd_models import *
+import gc,os,safetensors.torch,torch
+from modules import scripts, devices, processing,shared,sd_hijack,sd_models,script_loading,paths, sd_models_config
 from modules.modelloader import load_file_from_url
 from tqdm import tqdm
 from copy import deepcopy
-import json
-import gc
-import safetensors.torch
-import os
-import torch
 
-extension_name = 'Reload-as-inpaint'
+networks = script_loading.load_module(os.path.join(paths.extensions_builtin_dir,'Lora','networks.py'))
+
+EXTENSION_NAME = 'Inpaint Model Converter'
 EXTENSION_ROOT = scripts.basedir()
-ext2abs = lambda x: os.path.join(EXTENSION_ROOT,x)
+ext2abs = lambda *x: os.path.join(EXTENSION_ROOT,*x)
 
-with open(ext2abs('config.json'), 'r') as f:
-    config = json.load(f)
+INPAINT_PANTS_URL = 'https://huggingface.co/groinge/inpaintdifferencemerge/resolve/main/V1_5inpaintdifference.safetensors'
+INPAINT_PANTS = ext2abs('scripts','V1_5inpaintdifference.safetensors')
 
-ARCHITECTURES = {
-    'V1.5-inpaint': {
-        'name' : 'V1.5-inpaint-diff',
-        #Which element, shape index, and dimension to ID the architecture by
-        'id' : ['model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight',1,768],
-        'type_id' : ['model.diffusion_model.input_blocks.0.0.weight',1,4],
-        'filename' : 'models/V1_5inpaintdifference.safetensors',
-        'url' : 'https://huggingface.co/groinge/inpaintdifferencemerge/resolve/main/V1_5inpaintdifference.safetensors'
-    }
-}
+rejected_model_id = None
 
 class script(scripts.Script):
-        checkpointinfo = None
-        display = None
         def title(self):
-            return extension_name
+            return EXTENSION_NAME
 
         def show(self,is_img2img):
             return scripts.AlwaysVisible
         
         def ui(self,is_img2img):
-            with gr.Accordion(label=extension_name,visible=is_img2img,open=False):
-                with gr.Row(variant='default'):
-                    sets = gr.Checkboxgroup(value = config['sets'],choices=[("Auto convert","auto"),("Use cuda for merging","cuda")],label='Options')
-                    runbutton = gr.Button(value = 'Convert to inpaint',variant='primary')
-                    unloadbutton = gr.Button(value = 'Revert to standard model',variant='secondary')
-                with gr.Row():
-                    if is_img2img:
-                        script.display = gr.Textbox(label="",value="",interactive=False,max_lines=1)
-                
-                runbutton.click(fn=self.convert_cp,inputs=sets,outputs=script.display)
-                unloadbutton.click(fn=self.unload,outputs=script.display)
-                sets.change(fn=sets_config,inputs=sets)
-            return [sets]
+            with gr.Accordion(label=EXTENSION_NAME,visible=is_img2img,open=False):
+                checkbox = gr.Checkbox(label='Enable')
+                if not os.path.exists(INPAINT_PANTS):
+                    checkbox.input(fn=download_model,inputs=checkbox,outputs=checkbox)
 
-        def setup(self,p,sets):
-            if model_data.sd_model:
-                if isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask:
-                    if 'auto' in sets and not model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
-                        self.convert_cp(sets)
-                else: self.unload()
+            return [checkbox]
 
-        def convert_cp(self,use_cuda):
-            message,script.checkpointinfo = convert(use_cuda) #checkpoint info of the original model is kept so it can be reloaded
-            script.display.update(value=extension_name+':  '+message) 
-        
-        def unload(self):
-            if model_data.sd_model.sd_checkpoint_info.name.startswith('temp-inpainting-'):
-                gr.Info(extension_name+':  Reverting to standard model...')
-                model_data.__init__()
-                load_model(checkpoint_info=script.checkpointinfo)
-                print('Reverted to previous checkpoint.')
-                gr.Info(extension_name+':  Reverted to previous checkpoint.')
-                script.display.update(value='Reverted to previous checkpoint.')
+        def setup(self,p,enabled):
+            if shared.sd_model:
+                if isinstance(p, processing.StableDiffusionProcessingImg2Img) and p.image_mask and enabled:
+                    if shared.sd_model.used_config != sd_models_config.config_inpainting:
+                        convert()
+                elif shared.sd_model.used_config == sd_models_config.config_inpainting:
+                    convert(reverse=True)
 
 
-def sets_config(sets):
-    config['sets'] = sets
-    with open(ext2abs('config.json'), 'w') as f:
-        json.dump(config,f)
+def convert(reverse=False):
+    if not shared.sd_model.is_sd1 or not (shared.sd_model.used_config == sd_models_config.config_default or shared.sd_model.used_config == sd_models_config.config_inpainting):
+        #Save rejected model to prevent spam
+        if shared.sd_model.sd_checkpoint_info.ids != rejected_model_id:
+            gr.Warning(EXTENSION_NAME+': unsupported model.')
+        rejected_model_id = shared.sd_model.sd_checkpoint_info.ids
+        return
 
-def convert(sets):
-    device = 'cuda' if 'cuda' in sets else 'cpu'
+    with torch.no_grad():
+        for module in shared.sd_model.modules():
+            networks.network_restore_weights_from_backup(module)
 
-    if not model_data.sd_model: return "No checkpoint loaded.",None
-    sd_0, checkpoint_info, arch, message = grab_active_model_sd(device)
-    if not sd_0: return message,checkpoint_info
-    fake_cp_info = deepcopy(checkpoint_info)
+    device = devices.get_optimal_device_name()
+    shared.sd_model.to(device)
 
-    sd_1 = load_inpaint_statedict(arch, device)
+    sd_hijack.model_hijack.undo_hijack(shared.sd_model)
 
-    for k1 in tqdm(list(sd_1.keys()),desc='Merging models'):
-        k0 = 'model.diffusion_model.' + k1
+    checkpoint_info = deepcopy(shared.sd_model.sd_checkpoint_info)
+    model_dict = shared.sd_model.state_dict()
+    pants_dict = safetensors.torch.load_file(INPAINT_PANTS, device=device)
 
-        #This makes sure that only the layers shared between a standard and inpainting unet are merged
-        #Copied from https://github.com/hako-mikan/sd-webui-supermerger
-        a = list(sd_0[k0].shape)
-        b = list(sd_1[k1].shape)
-        if a != b and a[0:1] + a[2:] == b[0:1] + b[2:]:
-            sd_1[k1][:, 0:4, :, :] = sd_1[k1][:, 0:4, :, :] + sd_0[k0]
-            sd_0[k0] = sd_1[k1]
-        else:
-            sd_0[k0] = sd_1[k1] + sd_0[k0]
+    if not reverse:
+        checkpoint_info.name_for_extra = f"temp-inpainting-{checkpoint_info.name_for_extra}"
+        for key in tqdm(list(pants_dict.keys()),desc='Merging models'):
 
-    fake_cp_info.name = f"temp-inpainting-{checkpoint_info.name}"
+            t0 = model_dict[key]
+            t1 = pants_dict[key]
 
-    del sd_1
-    load_model(checkpoint_info=fake_cp_info, already_loaded_state_dict=sd_0)
-    del sd_0
+            a = list(t0.shape)
+            b = list(t1.shape)
 
-    gc.collect()
-    devices.torch_gc()
-    gr.Info(extension_name+':  Successfully converted model.')
-    return 'Successfully converted model.',checkpoint_info
-
-def load_inpaint_statedict(arch,device):
-    if os.path.isfile(ext2abs(arch['filename'])):
-        file = safetensors.torch.load_file(ext2abs(arch['filename']), device=device)
-    else:
-        gr.Info(f"Downloading {arch['name']} unet (1.68 GB)...")
-        file_path = load_file_from_url(arch['url'],model_dir=ext2abs('models'))
-        file = safetensors.torch.load_file(file_path, device=device)
-
-    return file.get('state_dict') or file
-
-def grab_active_model_sd(device):
-    state_dict = model_data.sd_model.state_dict()
-
-    for info in ARCHITECTURES.values():
-        elname, idindex, iddim = info['id']
-        elem = state_dict.get(elname)
-        #Identifies the architecture of the model by checking if it contains a known unique elem and dimension
-        if list(elem) and list(elem.shape)[idindex] == iddim:
-            elname, idindex, iddim = info['type_id']
-            elem = state_dict.get(elname)
-            #Makes sure its a standard model (Not inpaint or pix2pix)
-            if list(elem.shape)[idindex] == iddim:
-                arch = info
-                break
+            #https://github.com/hako-mikan/sd-webui-supermerger 🙏
+            if a != b and a[0:1] + a[2:] == b[0:1] + b[2:]:
+                t1[:, 0:4, :, :] = t1[:, 0:4, :, :] + t0
+                model_dict[key] = t1
             else:
-                del state_dict; return None,None,None,'Loaded checkpoint is already an inpainting or pix-to-pix model'
+                model_dict[key] = t1 + t0
     else:
-        del state_dict; return None,None,None,'Unsupported model architecture, this extension only supports V1.5 checkpoints'
-    del state_dict
-    
-    gr.Info(extension_name+':  Converting model to inpaint...')
+        checkpoint_info.name_for_extra = checkpoint_info.name_for_extra.replace('temp-inpainting-','')
+        for key in tqdm(list(pants_dict.keys()),desc='Merging models'):
 
-    model_data.sd_model.to(torch.device(device))
-    from modules import sd_hijack
-    sd_hijack.model_hijack.undo_hijack(model_data.sd_model) #Undo hijack to get a state_dict without optimizations
-    sd_0 = deepcopy(model_data.sd_model.state_dict())
-    checkpoint_info = model_data.sd_model.sd_checkpoint_info
+            t0 = model_dict[key]
+            t1 = pants_dict[key]
 
-    unload_model_weights(model_data.sd_model)
+            shape = list(t0.shape)
+            
+            if len(shape) == 4 and shape[1] == 9:
+                model_dict[key] =  t0[:, 0:4, :, :] - t1[:, 0:4, :, :]
+            else:
+                model_dict[key] = t0 - t1
+        
+
+    del pants_dict
+    sd_models.model_data.loaded_sd_models.remove(sd_models.model_data.sd_model)
+    sd_models.model_data.sd_model = None
+    sd_models.load_model(checkpoint_info=checkpoint_info, already_loaded_state_dict=model_dict)
+    del model_dict
+
     gc.collect()
     devices.torch_gc()
+    gr.Info(EXTENSION_NAME+':  Successfully converted model.')
 
-    return sd_0,checkpoint_info,arch,None
-
-    
+def download_model(checkbox):
+    if not os.path.exists(INPAINT_PANTS):
+        gr.Info(EXTENSION_NAME+": Downloading inpainting unet (1.68 GB)...")
+        load_file_from_url(INPAINT_PANTS_URL, model_dir=ext2abs('scripts'))
+        gr.Info(EXTENSION_NAME+": Download completed.")
+    return checkbox
