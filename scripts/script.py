@@ -62,7 +62,6 @@ class script(scripts.Script):
                         p.extra_generation_params['Convert inpaint'] = True
                 elif shared.sd_model.used_config == sd_models_config.config_inpainting:
                     convert(reverse=True)
-            return p
 
 
 def convert(reverse=False):
