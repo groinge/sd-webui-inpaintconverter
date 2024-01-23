@@ -17,16 +17,6 @@ INPAINT_PANTS = ext2abs('scripts','V1_5inpaintdifference.safetensors')
 
 rejected_model_id = None
 
-symlink_path = ext2abs("scripts",'stable_diffusion_models')
-sd_checkpoints_path = os.path.join(paths.models_path,'Stable-diffusion')
-try:
-    os.symlink(sd_checkpoints_path,symlink_path,target_is_directory=True)
-except FileExistsError:pass
-except OSError:
-    try:
-        import _winapi
-        _winapi.CreateJunction(sd_checkpoints_path,symlink_path)
-    except FileExistsError:pass
 
 class script(scripts.Script):
         def title(self):
@@ -86,7 +76,6 @@ def convert(reverse=False):
             checkpoint_info.name = checkpoint_info.name_for_extra + '.safetensors'
             checkpoint_info.model_name = checkpoint_info.name_for_extra
             checkpoint_info.ids = [checkpoint_info.model_name, checkpoint_info.name, checkpoint_info.name_for_extra]
-            checkpoint_info.filename = os.path.join(symlink_path, os.path.basename(checkpoint_info.filename))
             checkpoint_info.hash = hashlib.sha256(str(checkpoint_info.name_for_extra+checkpoint_info.filename+INPAINT_PANTS_URL).encode("utf-8")).hexdigest()
             sd_models.checkpoint_aliases[checkpoint_info.name] = checkpoint_info
 
