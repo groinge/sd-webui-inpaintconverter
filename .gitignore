@@ -1,0 +1,3 @@
+scripts/stable_diffusion_models/*
+*.pyc
+*.safetensors
