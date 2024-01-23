@@ -19,6 +19,8 @@ rejected_model_id = None
 
 
 class script(scripts.Script):
+        infotext_fields = []
+
         def title(self):
             return EXTENSION_NAME
 
@@ -31,6 +33,8 @@ class script(scripts.Script):
                 if not os.path.exists(INPAINT_PANTS):
                     checkbox.input(fn=download_model,inputs=checkbox,outputs=checkbox)
 
+            self.infotext_fields.append((checkbox, lambda d: 'Convert inpaint' in d))
+
             return [checkbox]
 
         def setup(self,p,enabled,*args,**kwargs):
@@ -41,9 +45,13 @@ class script(scripts.Script):
                         if model:
                             p.sd_model = model
                             #p.cached_c[0] = None
+                            # if model is converted successfully, extra_generation_params
+                            p.extra_generation_params['Convert inpaint'] = True
+                    else:
+                        # if model is already converted set extra_generation_params
+                        p.extra_generation_params['Convert inpaint'] = True
                 elif shared.sd_model.used_config == sd_models_config.config_inpainting:
                     convert(reverse=True)
-            return p
 
 
 def convert(reverse=False):
